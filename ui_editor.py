@@ -14,6 +14,9 @@ class DraggableList(QtWidgets.QListWidget):
         self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.setSpacing(6)
         self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizeAdjustPolicy(QtWidgets.QAbstractItemView.SizeAdjustPolicy.AdjustToContents)
     def dropEvent(self, e: QtGui.QDropEvent) -> None:
         super().dropEvent(e); self.moved.emit()
 
@@ -71,30 +74,97 @@ class ItemForm(QtWidgets.QWidget):
 
 class ItemCard(QtWidgets.QFrame):
     changed = QtCore.pyqtSignal()
+    toggled = QtCore.pyqtSignal(bool)
+    resized = QtCore.pyqtSignal()
     def __init__(self, it: Item, parent=None):
         super().__init__(parent); self.it = it
         self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel); self.setObjectName("ItemCard")
         v = QtWidgets.QVBoxLayout(self); v.setContentsMargins(8,8,8,8); v.setSpacing(6)
-        head = QtWidgets.QHBoxLayout()
-        self.toggle = QtWidgets.QToolButton(text="▾"); self.toggle.setCheckable(True); self.toggle.setChecked(True)
+        head = QtWidgets.QHBoxLayout(); head.setContentsMargins(0,0,0,0)
+        self.toggle = QtWidgets.QToolButton(); self.toggle.setCheckable(True); self.toggle.setChecked(True)
+        self.toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.toggle.setArrowType(QtCore.Qt.ArrowType.DownArrow)
+        self.toggle.setAutoRaise(True)
+        self.toggle.setToolTip("Collapse or expand this item")
         self.title = QtWidgets.QLabel(it.description or "Agenda item")
-        head.addWidget(self.toggle); head.addWidget(self.title, 1)
+        self.title.setObjectName("ItemTitle")
+        self.summary = QtWidgets.QLabel(self._summary_text())
+        self.summary.setObjectName("ItemSummary")
+        self.summary.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self.summary.setWordWrap(True)
+        self.summary.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.summary.hide()
+        head.addWidget(self.toggle)
+        head.addWidget(self.title, 1)
+        head.addWidget(self.summary, 2)
         v.addLayout(head)
-        self.form = ItemForm(it); self.form.changed.connect(self.changed)
-        v.addWidget(self.form)
+
+        self.body = QtWidgets.QFrame()
+        body_layout = QtWidgets.QVBoxLayout(self.body)
+        body_layout.setContentsMargins(0,0,0,0); body_layout.setSpacing(6)
+        self.form = ItemForm(it); self.form.changed.connect(self._on_form_changed)
+        body_layout.addWidget(self.form)
+        v.addWidget(self.body)
         self.toggle.toggled.connect(self._on_toggle)
+        self.body.setMinimumHeight(0)
+        self.body.setMaximumHeight(self.body.sizeHint().height())
+
+        self._animation = QtCore.QVariantAnimation(self)
+        self._animation.setDuration(220)
+        self._animation.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+        self._animation.valueChanged.connect(self._apply_animation_height)
+        self._animation.finished.connect(self._animation_finished)
 
     def _on_toggle(self, on: bool):
-        self.form.setVisible(on)
+        self.toggle.setArrowType(QtCore.Qt.ArrowType.DownArrow if on else QtCore.Qt.ArrowType.RightArrow)
+        self.summary.setText(self._summary_text())
+        self.summary.setVisible(not on)
+        self.title.setVisible(on)
+        if on:
+            self.body.setVisible(True)
+        start = self.body.maximumHeight()
+        end = self.body.layout().sizeHint().height() if on else 0
+        self._animation.stop()
+        self._animation.setStartValue(start)
+        self._animation.setEndValue(end)
+        self._animation.start()
+        self.toggled.emit(on)
 
     def apply(self):
         self.form.apply()
         self.title.setText(self.it.description or "Agenda item")
+        self.summary.setText(self._summary_text())
+
+    def _summary_text(self) -> str:
+        desc = self.it.description or "Agenda item"
+        status = self.it.status or ""
+        due = self.it.due_date or "No due date"
+        assignee = self.it.assignee_id or "Unassigned"
+        return f"{desc} — Status: {status} — Due: {due} — Owner: {assignee}"
+
+    def _apply_animation_height(self, value):
+        self.body.setMaximumHeight(int(value))
+        self.body.updateGeometry()
+        self.updateGeometry()
+        self.resized.emit()
+
+    def _animation_finished(self):
+        if self.body.maximumHeight() == 0:
+            self.body.setVisible(False)
+        else:
+            self.body.setVisible(True)
+        self.resized.emit()
+
+    def _on_form_changed(self):
+        self.form.apply()
+        self.title.setText(self.it.description or "Agenda item")
+        self.summary.setText(self._summary_text())
+        self.changed.emit()
 
 class SectionWidget(QtWidgets.QWidget):
     changed = QtCore.pyqtSignal()
     def __init__(self, section: Section, items: list[Item], parent=None):
-        super().__init__(parent); self.section = section; self._items = items
+        super().__init__(parent); self.section = section; self._items = items; self._list_item = None
         v = QtWidgets.QVBoxLayout(self); v.setContentsMargins(6,6,6,6); v.setSpacing(6)
         header = QtWidgets.QHBoxLayout()
         self.ed_title = QtWidgets.QLineEdit(section.name); self.ed_title.setPlaceholderText("Section title")
@@ -107,37 +177,94 @@ class SectionWidget(QtWidgets.QWidget):
         for it in sorted(items, key=lambda x:x.order):
             lw = QtWidgets.QListWidgetItem()
             card = ItemCard(it); card.changed.connect(self.changed)
+            card.changed.connect(self._update_height)
+            card.toggled.connect(lambda _on, c=card: self._on_card_toggled(c))
+            card.resized.connect(self._update_height)
             lw.setSizeHint(card.sizeHint())
             self.list.addItem(lw); self.list.setItemWidget(lw, card)
         v.addWidget(self.list)
         self.list.moved.connect(self._renumber_items)
 
-        self.btn_collapse.toggled.connect(lambda on: self.list.setVisible(on))
+        self.btn_collapse.toggled.connect(self._on_section_collapse)
         self.btn_add_item.clicked.connect(self._add_item)
         self.ed_title.textChanged.connect(self.changed)
+        QtCore.QTimer.singleShot(0, self._update_height)
+
+    def attach_list_item(self, item: QtWidgets.QListWidgetItem):
+        self._list_item = item
+        QtCore.QTimer.singleShot(0, self._update_size_hint)
 
     def _add_item(self):
         it = Item(id=uuid.uuid4().hex, description="New agenda item", status="OPEN", assignee_id=None, priority="Normal", due_date=None, tags=[], order=self.list.count(), section_name=self.section.name, notes=[])
         self._items.append(it)
         lw = QtWidgets.QListWidgetItem()
         card = ItemCard(it); card.changed.connect(self.changed)
+        card.changed.connect(self._update_height)
+        card.toggled.connect(lambda _on, c=card: self._on_card_toggled(c))
+        card.resized.connect(self._update_height)
         lw.setSizeHint(card.sizeHint())
         self.list.addItem(lw); self.list.setItemWidget(lw, card)
         self.changed.emit()
+        QtCore.QTimer.singleShot(0, self._update_height)
 
     def _renumber_items(self):
         for i in range(self.list.count()):
             card = self.list.itemWidget(self.list.item(i))
             card.it.order = i
         self.changed.emit()
+        self._update_height()
 
-    def apply(self):
+    def apply(self) -> list[Item]:
         self.section.name = self.ed_title.text().strip() or self.section.name
+        collected: list[Item] = []
         for i in range(self.list.count()):
             card = self.list.itemWidget(self.list.item(i))
             if card: card.apply()
             card.it.section_name = self.section.name
             card.it.order = i
+            collected.append(card.it)
+        return collected
+
+    def _update_height(self):
+        if not self.list.isVisible():
+            total = 0
+        else:
+            total = self.list.contentsMargins().top() + self.list.contentsMargins().bottom()
+            spacing = self.list.spacing()
+            for i in range(self.list.count()):
+                item = self.list.item(i)
+                card = self.list.itemWidget(item)
+                if not card:
+                    continue
+                hint = max(card.sizeHint().height(), card.height())
+                total += hint
+                if i:
+                    total += spacing
+                item.setSizeHint(card.sizeHint())
+        self.list.setFixedHeight(total)
+        self.list.updateGeometry()
+        self._update_size_hint()
+
+    def _on_card_toggled(self, card: ItemCard):
+        self._update_height()
+        card.summary.setText(card._summary_text())
+
+    def _on_section_collapse(self, expand: bool):
+        self.btn_collapse.setText("Collapse" if expand else "Expand")
+        self.list.setVisible(expand)
+        QtCore.QTimer.singleShot(0, self._update_height)
+
+    def _update_size_hint(self):
+        if not self._list_item:
+            return
+        hint = self.sizeHint()
+        self._list_item.setSizeHint(hint)
+        self.updateGeometry()
+        parent = self.parent()
+        while parent and not isinstance(parent, QtWidgets.QListWidget):
+            parent = parent.parent()
+        if isinstance(parent, QtWidgets.QListWidget):
+            parent.updateGeometries()
 
 class EditorPage(QtWidgets.QWidget):
     requestSave = QtCore.pyqtSignal()
@@ -175,6 +302,7 @@ class EditorPage(QtWidgets.QWidget):
             widget = SectionWidget(s, items); widget.changed.connect(self.requestSave.emit)
             lw.setSizeHint(widget.sizeHint())
             self.section_list.addItem(lw); self.section_list.setItemWidget(lw, widget)
+            widget.attach_list_item(lw)
 
         self.section_list.moved.connect(self._renumber_sections)
 
@@ -209,12 +337,16 @@ class EditorPage(QtWidgets.QWidget):
         widget = SectionWidget(s, []); widget.changed.connect(self.requestSave.emit)
         lw.setSizeHint(widget.sizeHint())
         self.section_list.addItem(lw); self.section_list.setItemWidget(lw, widget)
+        widget.attach_list_item(lw)
         self.requestSave.emit()
 
     def _set_all_sections(self, expand: bool):
         for i in range(self.section_list.count()):
             w = self.section_list.itemWidget(self.section_list.item(i))
-            w.list.setVisible(expand)
+            if w.btn_collapse.isChecked() != expand:
+                w.btn_collapse.setChecked(expand)
+            else:
+                w._on_section_collapse(expand)
 
     def save(self):
         h = self.meeting.header
@@ -225,9 +357,12 @@ class EditorPage(QtWidgets.QWidget):
         h.location = self.ed_loc.text().strip()
         h.teams_link = self.ed_link.text().strip()
 
+        aggregated: list[Item] = []
         for i in range(self.section_list.count()):
             w = self.section_list.itemWidget(self.section_list.item(i))
             w.section.order = i
-            w.apply()
+            aggregated.extend(w.apply())
+
+        self.meeting.items = aggregated
 
         self.store.save_meeting(self.project, self.track, self.meeting)

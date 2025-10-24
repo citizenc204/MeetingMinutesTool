@@ -5,6 +5,11 @@ from pathlib import Path
 from typing import List
 from lxml import etree
 from models import Project, Track, Meeting, MeetingHeader, Section, Item, Note
+from exporters import (
+    export_meeting_to_docx,
+    export_meeting_to_pdf,
+    export_meeting_to_ics,
+)
 
 def slugify(name: str) -> str:
     s = name.strip().lower().replace(" ", "-")
@@ -39,6 +44,28 @@ class XMLStore:
         (p/"attachments").mkdir(parents=True, exist_ok=True); (p/"exports").mkdir(parents=True, exist_ok=True); return p
     def meeting_xml(self, proj: Project, t: Track, number: str) -> Path:
         return self.meeting_dir(proj, t, number) / "meeting.xml"
+
+    def meeting_exports_dir(self, proj: Project, t: Track, number: str) -> Path:
+        return self.meeting_dir(proj, t, number) / "exports"
+
+    def _export_basename(self, meeting: Meeting) -> str:
+        topic_slug = slugify(meeting.header.topic or meeting.number or "meeting")
+        return f"{meeting.number}_{topic_slug}" if meeting.number else topic_slug
+
+    def export_meeting_pdf(self, proj: Project, t: Track, meeting: Meeting) -> Path:
+        base = self._export_basename(meeting)
+        dest = self.meeting_exports_dir(proj, t, meeting.number) / f"{base}.pdf"
+        return export_meeting_to_pdf(proj, t, meeting, dest)
+
+    def export_meeting_docx(self, proj: Project, t: Track, meeting: Meeting) -> Path:
+        base = self._export_basename(meeting)
+        dest = self.meeting_exports_dir(proj, t, meeting.number) / f"{base}.docx"
+        return export_meeting_to_docx(proj, t, meeting, dest)
+
+    def export_meeting_ics(self, proj: Project, t: Track, meeting: Meeting) -> Path:
+        base = self._export_basename(meeting)
+        dest = self.meeting_exports_dir(proj, t, meeting.number) / f"{base}.ics"
+        return export_meeting_to_ics(proj, t, meeting, dest)
 
     # Project CRUD
     def save_project(self, p: Project) -> None:
