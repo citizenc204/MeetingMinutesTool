@@ -13,6 +13,9 @@ QPushButton { border: 1px solid #cfd6e0; border-radius: 8px; padding: 6px 10px; 
 QPushButton:hover { background: #eef3ff; }
 QToolButton { padding: 4px 8px; }
 QTreeWidget::item:selected { background: #e6f0ff; color: #111; }
+#ItemCard { background: #ffffff; border: 1px solid #d7dbe2; border-radius: 12px; }
+#ItemTitle { font-weight: 600; }
+#ItemSummary { color: #4b5563; font-style: italic; }
 """
 
 DARK_QSS = """
@@ -26,6 +29,9 @@ QPushButton { border: 1px solid #425067; border-radius: 8px; padding: 6px 10px; 
 QPushButton:hover { background: #38475f; }
 QToolButton { padding: 4px 8px; }
 QTreeWidget::item:selected { background: #2e5a9f; color: #fff; }
+#ItemCard { background: #262c35; border: 1px solid #414856; border-radius: 12px; }
+#ItemTitle { font-weight: 600; }
+#ItemSummary { color: #9dadc4; font-style: italic; }
 """
 
 class ThemeManager:

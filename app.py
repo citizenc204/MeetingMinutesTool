@@ -46,6 +46,11 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.addSeparator()
         act_save = tb.addAction("Save All"); act_save.triggered.connect(self.on_save_all)
         tb.addSeparator()
+        self._export_actions: list[QtGui.QAction] = []
+        self.act_export_pdf = tb.addAction("Export PDF"); self.act_export_pdf.triggered.connect(self.on_export_pdf); self._export_actions.append(self.act_export_pdf)
+        self.act_export_docx = tb.addAction("Export DOCX"); self.act_export_docx.triggered.connect(self.on_export_docx); self._export_actions.append(self.act_export_docx)
+        self.act_export_ics = tb.addAction("Export ICS"); self.act_export_ics.triggered.connect(self.on_export_ics); self._export_actions.append(self.act_export_ics)
+        tb.addSeparator()
         act_theme = tb.addAction("Light/Dark"); act_theme.triggered.connect(self.on_toggle_theme)
 
         split = QtWidgets.QSplitter(); split.setOrientation(QtCore.Qt.Orientation.Horizontal); self.setCentralWidget(split)
@@ -56,6 +61,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.center.addWidget(self.placeholder)
         self.left.currentItemChanged.connect(self._on_nav_selected)
         self.statusBar().showMessage("Ready")
+        self._set_export_actions_enabled(False)
+
+    def _current_editor_page(self):
+        widget = self.center.currentWidget()
+        if isinstance(widget, EditorPage):
+            return widget
+        if isinstance(widget, QtWidgets.QScrollArea):
+            inner = widget.widget()
+            if isinstance(inner, EditorPage):
+                return inner
+        return None
+
+    def _show_editor_page(self, page: EditorPage):
+        for idx in reversed(range(1, self.center.count())):
+            old = self.center.widget(idx)
+            self.center.removeWidget(old)
+            old.deleteLater()
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setWidget(page)
+        self.center.addWidget(scroll)
+        self.center.setCurrentWidget(scroll)
 
     def _refresh_nav(self):
         self.left.clear()
@@ -196,12 +224,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self.store.delete_meeting(pslug, tslug, num); self._refresh_nav()
 
     def on_save_all(self):
-        page = self.center.currentWidget()
-        if hasattr(page, "save"): page.save()
+        page = self._current_editor_page()
+        if page: page.save()
         QtWidgets.QMessageBox.information(self, "Saved", "All changes saved.")
 
     def on_toggle_theme(self):
         self.theme.toggle(QtWidgets.QApplication.instance())
+
+    def on_export_pdf(self):
+        self._export_current_meeting("pdf")
+
+    def on_export_docx(self):
+        self._export_current_meeting("docx")
+
+    def on_export_ics(self):
+        self._export_current_meeting("ics")
 
     def _on_nav_selected(self):
         item = self.left.currentItem()
@@ -214,13 +251,71 @@ class MainWindow(QtWidgets.QMainWindow):
             proj = next((p for p in projects if p.slug==data[1]), None)
             track = next((t for t in proj.tracks if t.slug==data[2]), None) if proj else None
             meeting = self.store.load_meeting(proj, track, data[3]) if (proj and track) else None
-            if not meeting: return
+            if not meeting:
+                self._set_export_actions_enabled(False)
+                self.center.setCurrentWidget(self.placeholder)
+                return
+            self._set_export_actions_enabled(True)
             page = EditorPage(self.store, proj, track, meeting)
-            self.center.addWidget(page); self.center.setCurrentWidget(page)
+            self._show_editor_page(page)
             self.statusBar().showMessage(f"Editing {proj.name} / {track.name} / {data[3]}")
         elif data[0]=="track":
+            self._set_export_actions_enabled(False)
             if item.childCount():
                 self.left.setCurrentItem(item.child(0))
+            else:
+                self.center.setCurrentWidget(self.placeholder)
+        else:
+            self._set_export_actions_enabled(False)
+            self.center.setCurrentWidget(self.placeholder)
+
+    def _set_export_actions_enabled(self, enabled: bool) -> None:
+        for act in getattr(self, "_export_actions", []):
+            act.setEnabled(enabled)
+
+    def _export_current_meeting(self, kind: str) -> None:
+        data = self._current_context()
+        if not data or data[0] != "meeting":
+            QtWidgets.QMessageBox.information(self, "Select meeting", "Select a meeting to export.")
+            return
+
+        projects = self.store.load_projects()
+        proj = next((p for p in projects if p.slug == data[1]), None)
+        track = next((t for t in proj.tracks if t.slug == data[2]), None) if proj else None
+        if not (proj and track):
+            QtWidgets.QMessageBox.warning(self, "Missing data", "Unable to locate the selected meeting.")
+            return
+
+        page = self._current_editor_page()
+        meeting_obj = None
+        if page and page.meeting.number == data[3]:
+            page.save()
+            meeting_obj = page.meeting
+        else:
+            meeting_obj = self.store.load_meeting(proj, track, data[3])
+        if not meeting_obj:
+            QtWidgets.QMessageBox.warning(self, "Missing meeting", "Unable to load meeting details for export.")
+            return
+
+        try:
+            if kind == "pdf":
+                dest = self.store.export_meeting_pdf(proj, track, meeting_obj)
+            elif kind == "docx":
+                dest = self.store.export_meeting_docx(proj, track, meeting_obj)
+            elif kind == "ics":
+                dest = self.store.export_meeting_ics(proj, track, meeting_obj)
+            else:
+                raise ValueError(f"Unsupported export format: {kind}")
+        except RuntimeError as exc:
+            QtWidgets.QMessageBox.warning(self, "Export unavailable", str(exc))
+            return
+        except Exception as exc:
+            log.exception("Export failed", exc_info=exc)
+            QtWidgets.QMessageBox.critical(self, "Export failed", str(exc))
+            return
+
+        self.statusBar().showMessage(f"Exported meeting to {dest}")
+        QtWidgets.QMessageBox.information(self, "Export complete", f"Export created:\n{dest}")
 
 def main():
     print("Starting QApplication...")
